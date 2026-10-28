@@ -8,8 +8,7 @@
     {
       "binding": "DB",
       "database_name": "schedly",
-      // Replace with the id printed by `npx wrangler d1 create schedly`.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "ec585ae0-e305-428f-b532-e21b3a5f1a8d",
       "migrations_dir": "migrations"
     }
   ],
