@@ -6,7 +6,7 @@ Upload an image with `/schedule` and Schedly reads it with Gemini. You review (a
 
 - Runs on **Cloudflare Workers** (free tier) using Discord's **HTTP Interactions**, so there's no always-on gateway connection.
 - Stores previews and created events in **Cloudflare D1**.
-- Uses **Google Gemini** (`gemini-2.5-flash`) with image input and structured JSON output.
+- Uses **Google Gemini** (`gemini-3.8-flash`, with automatic fallbacks) with image input and structured JSON output.
 - Has **zero runtime npm dependencies**.
 
 ## Using `/schedule`
@@ -89,7 +89,9 @@ Fill in `.dev.vars`, not `.dev.vars.example`. The example file is committed to g
 
 ### 3. Gemini
 
-Create an API key in [Google AI Studio](https://aistudio.google.com/apikey) and put it in `GEMINI_API_KEY`. To use a different model, change `GEMINI_MODEL` in `wrangler.jsonc`.
+Create an API key in [Google AI Studio](https://aistudio.google.com/apikey) and put it in `GEMINI_API_KEY`.
+
+Models are set in `wrangler.jsonc`. `GEMINI_MODEL` is tried first, then each model in `GEMINI_FALLBACK_MODELS` (comma-separated). Schedly falls back when a model is retired (404), rate-limited (429) or overloaded (5xx). Google retires older models for new API keys (`gemini-2.5-flash` is one), so update these if extraction starts failing. To see which models your key can use, run `curl -H "x-goog-api-key: $GEMINI_API_KEY" https://generativelanguage.googleapis.com/v1beta/models`.
 
 > On the Gemini free tier, Google may use prompts (including uploaded images) to improve its products. Don't use Schedly with images you can't share with Google.
 

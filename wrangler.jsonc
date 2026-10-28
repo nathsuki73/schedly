@@ -13,7 +13,8 @@
     }
   ],
   "vars": {
-    "GEMINI_MODEL": "gemini-2.5-flash"
+    "GEMINI_MODEL": "gemini-3.8-flash",
+    "GEMINI_FALLBACK_MODELS": "gemini-3.6-flash,gemini-flash-latest"
   }
   // Secrets (set with `npx wrangler secret put <NAME>`, or `.dev.vars` locally):
   //   DISCORD_APPLICATION_ID, DISCORD_PUBLIC_KEY, DISCORD_BOT_TOKEN, GEMINI_API_KEY

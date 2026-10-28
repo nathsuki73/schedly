@@ -97,54 +97,82 @@ export function buildSystemPrompt(today: string): string {
   ].join("\n");
 }
 
+/**
+ * Statuses where another model may succeed: retired/unknown model (404), per-model quota (429),
+ * and overload/outage (500, 502, 503, 504).
+ */
+const FALLBACK_STATUSES = new Set([404, 429, 500, 502, 503, 504]);
+
+/** Primary model followed by the comma-separated fallbacks, without duplicates. */
+export function modelChain(env: Pick<Env, "GEMINI_MODEL" | "GEMINI_FALLBACK_MODELS">): string[] {
+  const all = [env.GEMINI_MODEL, ...(env.GEMINI_FALLBACK_MODELS ?? "").split(",")].map((m) => m.trim());
+  return [...new Set(all.filter(Boolean))];
+}
+
 export async function callGemini(
   env: Env,
   systemPrompt: string,
   image: { base64: string; mimeType: string },
   text: string,
 ): Promise<RawExtraction> {
-  let res: Response;
-  try {
-    res = await fetch(`${GEMINI_API}/models/${encodeURIComponent(env.GEMINI_MODEL)}:generateContent`, {
-      method: "POST",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: [
-          {
-            role: "user",
-            parts: [{ inlineData: { mimeType: image.mimeType, data: image.base64 } }, { text }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0,
-          responseMimeType: "application/json",
-          responseSchema: RESPONSE_SCHEMA,
-          thinkingConfig: { thinkingBudget: 0 },
-        },
-      }),
-    });
-  } catch (err) {
-    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
-      throw new UserFacingError("The AI took too long to read that image. Please try again.");
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    contents: [
+      {
+        role: "user",
+        parts: [{ inlineData: { mimeType: image.mimeType, data: image.base64 } }, { text }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0,
+      responseMimeType: "application/json",
+      responseSchema: RESPONSE_SCHEMA,
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  });
+
+  // One deadline shared by all attempts, so fallbacks can't outlive the waitUntil window.
+  const signal = AbortSignal.timeout(TIMEOUT_MS);
+  let lastStatus = 0;
+  let res: Response | null = null;
+
+  for (const model of modelChain(env)) {
+    try {
+      res = await fetch(`${GEMINI_API}/models/${encodeURIComponent(model)}:generateContent`, {
+        method: "POST",
+        signal,
+        headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+        body,
+      });
+    } catch (err) {
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        throw new UserFacingError("The AI took too long to read that image. Please try again.");
+      }
+      throw err;
     }
-    throw err;
+    if (res.ok) break;
+
+    lastStatus = res.status;
+    // Log status and a short excerpt only; never the request (it contains the API key header and image).
+    console.error("Gemini error", model, res.status, (await res.text()).slice(0, 300));
+    res = null;
+    if (!FALLBACK_STATUSES.has(lastStatus)) break;
   }
 
-  if (res.status === 429) {
-    throw new UserFacingError("The AI service is busy right now (rate limit reached). Please try again in a minute.");
-  }
-  if (!res.ok) {
-    // Log status and a short excerpt only; never the request (it contains the API key header and image).
-    console.error("Gemini error", res.status, (await res.text()).slice(0, 300));
-    throw new UserFacingError("The AI service returned an error. Please try again later.");
-  }
+  if (!res) throw new UserFacingError(geminiFailureMessage(lastStatus));
 
   const data = await res.json<{ candidates?: { content?: { parts?: { text?: string }[] } }[] }>();
   const answer = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("");
   if (!answer) throw new UserFacingError("The AI couldn't read that image. Please try a clearer one.");
   return parseExtraction(answer);
+}
+
+function geminiFailureMessage(status: number): string {
+  if (status === 429) return "The AI service is busy right now (rate limit reached). Please try again in a minute.";
+  if (status === 503 || status === 502 || status === 504) {
+    return "The AI service is overloaded right now. Please try again in a minute.";
+  }
+  return "The AI service returned an error. Please try again later.";
 }
 
 /** Parses and shape-checks the model's JSON so later code can rely on field types. */

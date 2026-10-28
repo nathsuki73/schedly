@@ -45,7 +45,7 @@ The free plan's `waitUntil` window is about 30 seconds, and the Gemini timeout i
 **Extraction pipeline:**
 
 1. `extraction/image.ts` checks the attachment. Downloads come only from `cdn.discordapp.com` / `media.discordapp.net`, are size-capped while streaming, and the format is detected from the file's first bytes.
-2. `extraction/gemini.ts` sends the image inline (native `Uint8Array#toBase64`) with a `responseSchema`. `parseExtraction` shape-checks the JSON.
+2. `extraction/gemini.ts` sends the image inline (native `Uint8Array#toBase64`) with a `responseSchema`. It tries `GEMINI_MODEL`, then `GEMINI_FALLBACK_MODELS`, on 404, 429 or 5xx, all within one 25-second deadline. `parseExtraction` shape-checks the JSON.
 3. `extraction/draft.ts`:
    - `toDraft` builds an `EventDraft`, which can be incomplete.
    - `resolveDraft` produces either a `ResolvedEvent` in UTC or a list of what's `missing`.

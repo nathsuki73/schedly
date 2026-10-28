@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { extractDrafts } from "../../src/extraction/extract.ts";
-import { parseExtraction } from "../../src/extraction/gemini.ts";
+import { modelChain, parseExtraction } from "../../src/extraction/gemini.ts";
 import { geminiResponse, IMAGE_BYTES, jsonResponse, makeRawEvent, mockFetch } from "../helpers.ts";
 
 const NOW = Date.parse("2030-01-01T00:00:00Z");
@@ -54,6 +54,28 @@ describe("extractDrafts", () => {
     );
   });
 
+  it("falls back to the next model when the primary is retired or overloaded", async () => {
+    const [primary, fallback] = modelChain(env);
+    const calls = mockFetch(
+      (req) => (req.url.includes(`/models/${primary}:`) ? jsonResponse({ error: { message: "no longer available" } }, 404) : undefined),
+      (req) => (req.url.includes(`/models/${fallback}:`) ? geminiResponse({ contains_event: true, reason: null, events: [makeRawEvent()] }) : undefined),
+    );
+    expect(await extractDrafts(env, png, { now: NOW })).toHaveLength(1);
+    expect(calls.map((c) => c.url.split("/models/")[1]!.split(":")[0])).toEqual([primary, fallback]);
+  });
+
+  it("tries every model, then reports an overload", async () => {
+    const calls = mockFetch(() => jsonResponse({ error: {} }, 503));
+    await expect(extractDrafts(env, png, { now: NOW })).rejects.toThrow(/overloaded right now/);
+    expect(calls).toHaveLength(modelChain(env).length);
+  });
+
+  it("doesn't fall back on request errors that another model wouldn't fix", async () => {
+    const calls = mockFetch(() => jsonResponse({ error: {} }, 400));
+    await expect(extractDrafts(env, png, { now: NOW })).rejects.toThrow("The AI service returned an error");
+    expect(calls).toHaveLength(1);
+  });
+
   it("surfaces Gemini rate limits and errors as friendly messages", async () => {
     mockFetch(() => jsonResponse({ error: {} }, 429));
     await expect(extractDrafts(env, png, { now: NOW })).rejects.toThrow(/rate limit/);
@@ -82,5 +104,12 @@ describe("parseExtraction", () => {
   it("caps the number of events", () => {
     const events = Array.from({ length: 30 }, () => ({ title: "x" }));
     expect(parseExtraction(JSON.stringify({ contains_event: true, events })).events).toHaveLength(10);
+  });
+});
+
+describe("modelChain", () => {
+  it("lists the primary first and drops blanks and duplicates", () => {
+    expect(modelChain({ GEMINI_MODEL: "a", GEMINI_FALLBACK_MODELS: " b, ,a,c " })).toEqual(["a", "b", "c"]);
+    expect(modelChain({ GEMINI_MODEL: "a" })).toEqual(["a"]);
   });
 });

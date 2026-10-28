@@ -6,4 +6,6 @@ export interface Env {
   DISCORD_BOT_TOKEN: string;
   GEMINI_API_KEY: string;
   GEMINI_MODEL: string;
+  /** Optional comma-separated models to try when the primary is retired, overloaded, or rate-limited. */
+  GEMINI_FALLBACK_MODELS?: string;
 }
