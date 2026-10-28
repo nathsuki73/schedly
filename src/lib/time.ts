@@ -81,3 +81,69 @@ export function localToUtcMs(local: LocalDateTime, zone: Zone): number {
   const guess = wall - zoneOffsetMinutes(zone.timeZone, wall) * 60000;
   return wall - zoneOffsetMinutes(zone.timeZone, guess) * 60000;
 }
+
+// --- Timezone input -------------------------------------------------------------------------
+// Zones are stored as strings: an IANA name ("Asia/Manila") or a fixed offset ("+08:00").
+
+/** Abbreviations that name different zones in different regions (e.g. PST = Pacific or Philippine). */
+export const AMBIGUOUS_ZONE_ABBREVIATIONS = new Set(["PST", "CST", "IST", "BST", "AST", "MST", "ECT"]);
+
+const ZONE_ALIASES: Record<string, string> = {
+  PHT: "Asia/Manila",
+  PHST: "Asia/Manila",
+  "PHILIPPINE TIME": "Asia/Manila",
+  "PHILIPPINE STANDARD TIME": "Asia/Manila",
+  PHILIPPINES: "Asia/Manila",
+  MANILA: "Asia/Manila",
+  SGT: "Asia/Singapore",
+  HKT: "Asia/Hong_Kong",
+  JST: "Asia/Tokyo",
+  KST: "Asia/Seoul",
+  WIB: "Asia/Jakarta",
+  AEST: "Australia/Sydney",
+  AEDT: "Australia/Sydney",
+  CET: "Europe/Paris",
+  CEST: "Europe/Paris",
+  EDT: "America/New_York",
+  PDT: "America/Los_Angeles",
+  UTC: "UTC",
+  GMT: "UTC",
+  Z: "UTC",
+};
+
+const OFFSET_INPUT_RE = /^(?:UTC|GMT)?\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?$/i;
+
+/**
+ * Normalizes user/AI timezone text to a stored zone string, or null if it is unknown or
+ * ambiguous. Accepts IANA names, offsets ("UTC+8", "GMT+08:00", "+0530"), and common aliases.
+ */
+export function parseTimeZoneInput(input: string | null | undefined): string | null {
+  const raw = (input ?? "").trim();
+  if (!raw || raw.length > 64) return null;
+
+  const upper = raw.toUpperCase().replace(/\s+/g, " ");
+  if (AMBIGUOUS_ZONE_ABBREVIATIONS.has(upper)) return null;
+  const alias = ZONE_ALIASES[upper];
+  if (alias) return alias;
+
+  const m = OFFSET_INPUT_RE.exec(raw);
+  if (m) {
+    const hours = Number(m[2]);
+    const minutes = Number(m[3] ?? 0);
+    if (hours > 14 || minutes > 59) return null;
+    return `${m[1]}${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  }
+
+  if (isValidTimeZone(raw)) return new Intl.DateTimeFormat("en-US", { timeZone: raw }).resolvedOptions().timeZone;
+  return null;
+}
+
+export function toZone(zone: string): Zone {
+  const offset = parseUtcOffset(zone);
+  return offset !== null ? { offsetMinutes: offset } : { timeZone: zone };
+}
+
+/** Human-readable zone label, e.g. "Asia/Manila" or "UTC+08:00". */
+export function formatZone(zone: string): string {
+  return parseUtcOffset(zone) !== null ? `UTC${zone}` : zone;
+}

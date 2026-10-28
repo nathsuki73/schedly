@@ -1,6 +1,6 @@
 import { handlePing } from "./commands/ping.ts";
 import { handleSchedule } from "./commands/schedule.ts";
-import { handleApprovalButton } from "./components/approval.ts";
+import { handleEditSubmit, handlePreviewComponent } from "./components/preview-actions.ts";
 import { ephemeral } from "./discord/responses.ts";
 import {
   InteractionResponseType,
@@ -30,7 +30,10 @@ export async function routeInteraction(
       }
 
     case InteractionType.MESSAGE_COMPONENT:
-      return handleApprovalButton(interaction, env, ctx);
+      return handlePreviewComponent(interaction, env, ctx);
+
+    case InteractionType.MODAL_SUBMIT:
+      return handleEditSubmit(interaction, env);
 
     default:
       return ephemeral("Unsupported interaction.");

@@ -1,93 +1,86 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { extractEvent } from "../../src/extraction/extract.ts";
-import { fetchPage, MAX_PAGE_BYTES } from "../../src/extraction/fetch-page.ts";
-import eventPage from "../fixtures/event-page.html?raw";
-import { geminiResponse, html, jsonResponse, mockFetch } from "../helpers.ts";
+import { extractDrafts } from "../../src/extraction/extract.ts";
+import { parseExtraction } from "../../src/extraction/gemini.ts";
+import { geminiResponse, IMAGE_BYTES, jsonResponse, makeRawEvent, mockFetch } from "../helpers.ts";
 
-const GEMINI = "generativelanguage.googleapis.com";
 const NOW = Date.parse("2030-01-01T00:00:00Z");
+const png = { bytes: IMAGE_BYTES.png, mimeType: "image/png" as const };
 
-const gemini = (extraction: Record<string, unknown>) => (req: Request) =>
-  req.url.includes(GEMINI) ? geminiResponse(extraction) : undefined;
+describe("extractDrafts", () => {
+  it("sends the image inline with a structured-output request", async () => {
+    const calls = mockFetch(() => geminiResponse({ contains_event: true, reason: null, events: [makeRawEvent()] }));
 
-const rustWorkshop = {
-  is_event: true,
-  title: "Intro to Rust Workshop",
-  description: "A hands-on beginner workshop.",
-  start_local: "2030-03-05T18:00",
-  end_local: "2030-03-05T19:30",
-  utc_offset: "+08:00",
-  timezone: "Asia/Manila",
-  location: "Zoom",
-  is_online: true,
-};
+    const drafts = await extractDrafts(env, png, { now: NOW });
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]!.title).toBe("Intro to Rust Workshop");
 
-describe("extractEvent", () => {
-  it("fetches the page, sends a structured request to Gemini, and validates the answer", async () => {
-    const calls = mockFetch((req) => (req.url.startsWith("https://example.com/") ? html(eventPage) : undefined), gemini(rustWorkshop));
-
-    const event = await extractEvent(env, new URL("https://example.com/rust"), { now: NOW });
-    expect(event.startTime).toBe("2030-03-05T10:00:00.000Z");
-    expect(event.title).toBe("Intro to Rust Workshop");
-
-    const geminiCall = calls.find((c) => c.url.includes(GEMINI))!;
-    expect(geminiCall.url).toContain(`/models/${env.GEMINI_MODEL}:generateContent`);
-    expect(geminiCall.headers.get("x-goog-api-key")).toBe(env.GEMINI_API_KEY);
-    expect(geminiCall.url).not.toContain(env.GEMINI_API_KEY); // key never in the URL
-    const body = geminiCall.body as {
+    const call = calls[0]!;
+    expect(call.url).toContain(`/models/${env.GEMINI_MODEL}:generateContent`);
+    expect(call.headers.get("x-goog-api-key")).toBe(env.GEMINI_API_KEY);
+    expect(call.url).not.toContain(env.GEMINI_API_KEY);
+    const body = call.body as {
       systemInstruction: { parts: { text: string }[] };
-      contents: { parts: { text: string }[] }[];
+      contents: { parts: [{ inlineData: { mimeType: string; data: string } }, { text: string }] }[];
       generationConfig: { responseMimeType: string };
     };
+    expect(body.contents[0]!.parts[0].inlineData).toEqual({ mimeType: "image/png", data: btoa(String.fromCharCode(...IMAGE_BYTES.png)) });
     expect(body.generationConfig.responseMimeType).toBe("application/json");
     expect(body.systemInstruction.parts[0]!.text).toMatch(/untrusted data/);
+    expect(body.systemInstruction.parts[0]!.text).toMatch(/Never invent information/);
     expect(body.systemInstruction.parts[0]!.text).toContain("2030-01-01");
-    expect(body.contents[0]!.parts[0]!.text).toContain("2030-03-05T18:00:00+08:00");
   });
 
-  it("surfaces Gemini rate limits as a friendly message", async () => {
-    mockFetch(
-      (req) => (req.url.startsWith("https://example.com/") ? html(eventPage) : undefined),
-      (req) => (req.url.includes(GEMINI) ? jsonResponse({ error: {} }, 429) : undefined),
+  it("returns every distinct event from a multi-event poster", async () => {
+    mockFetch(() =>
+      geminiResponse({
+        contains_event: true,
+        reason: null,
+        events: [
+          makeRawEvent({ title: "Day 1: Basics", start_date: "2099-03-05" }),
+          makeRawEvent({ title: "Day 2: Async", start_date: "2099-03-12" }),
+          makeRawEvent({ title: null, start_date: null }), // unidentifiable: dropped
+        ],
+      }),
     );
-    await expect(extractEvent(env, new URL("https://example.com/rust"), { now: NOW })).rejects.toThrow(/rate limit/);
+    const drafts = await extractDrafts(env, png, { now: NOW });
+    expect(drafts.map((d) => d.title)).toEqual(["Day 1: Basics", "Day 2: Async"]);
+  });
+
+  it("rejects images without identifiable event information", async () => {
+    mockFetch(() => geminiResponse({ contains_event: false, reason: "a photo of a cat", events: [] }));
+    await expect(extractDrafts(env, png, { now: NOW })).rejects.toThrow(
+      /couldn't find any event details in that image \(a photo of a cat\)/,
+    );
+  });
+
+  it("surfaces Gemini rate limits and errors as friendly messages", async () => {
+    mockFetch(() => jsonResponse({ error: {} }, 429));
+    await expect(extractDrafts(env, png, { now: NOW })).rejects.toThrow(/rate limit/);
+    mockFetch(() => jsonResponse({ error: { message: "secret detail" } }, 500));
+    await expect(extractDrafts(env, png, { now: NOW })).rejects.toThrow("The AI service returned an error. Please try again later.");
   });
 });
 
-describe("fetchPage", () => {
-  it("follows safe redirects but blocks redirects to private addresses", async () => {
-    mockFetch((req) => {
-      if (req.url === "https://short.example/a") return new Response(null, { status: 302, headers: { location: "https://example.com/final" } });
-      if (req.url === "https://example.com/final") return html("<p>ok</p>");
-      if (req.url === "https://short.example/evil") return new Response(null, { status: 301, headers: { location: "http://169.254.169.254/" } });
-      return undefined;
-    });
-
-    expect((await fetchPage(new URL("https://short.example/a"))).finalUrl).toBe("https://example.com/final");
-    await expect(fetchPage(new URL("https://short.example/evil"))).rejects.toThrow(/private or local address/);
-  });
-
-  it("rejects non-HTML responses and error statuses", async () => {
-    mockFetch(
-      (req) => (req.url.endsWith(".pdf") ? new Response("%PDF", { headers: { "content-type": "application/pdf" } }) : undefined),
-      (req) => (req.url.endsWith("/missing") ? html("nope", 404) : undefined),
-      (req) => (req.url.endsWith("/private") ? html("login", 403) : undefined),
+describe("parseExtraction", () => {
+  it("tolerates malformed or wrongly-typed fields", () => {
+    const parsed = parseExtraction(
+      JSON.stringify({
+        contains_event: "yes",
+        events: [{ title: 42, start_date: "2099-01-01", ambiguities: ["ok", 7], is_online: "true" }, "junk"],
+      }),
     );
-    await expect(fetchPage(new URL("https://example.com/file.pdf"))).rejects.toThrow(/isn't a web page/);
-    await expect(fetchPage(new URL("https://example.com/missing"))).rejects.toThrow(/404/);
-    await expect(fetchPage(new URL("https://example.com/private"))).rejects.toThrow(/login or blocks bots/);
+    expect(parsed.contains_event).toBe(false);
+    expect(parsed.events).toHaveLength(1);
+    expect(parsed.events[0]).toMatchObject({ title: null, start_date: "2099-01-01", ambiguities: ["ok"], is_online: null });
   });
 
-  it("truncates oversized pages", async () => {
-    mockFetch(() => html("a".repeat(MAX_PAGE_BYTES + 5000)));
-    expect((await fetchPage(new URL("https://example.com/big"))).html.length).toBe(MAX_PAGE_BYTES);
+  it("rejects non-JSON answers", () => {
+    expect(() => parseExtraction("Sure! Here's the event:")).toThrow(/unreadable answer/);
   });
 
-  it("reports network failures without leaking details", async () => {
-    mockFetch(() => {
-      throw new TypeError("internal network error detail");
-    });
-    await expect(fetchPage(new URL("https://example.com/"))).rejects.toThrow("I couldn't reach that page");
+  it("caps the number of events", () => {
+    const events = Array.from({ length: 30 }, () => ({ title: "x" }));
+    expect(parseExtraction(JSON.stringify({ contains_event: true, events })).events).toHaveLength(10);
   });
 });

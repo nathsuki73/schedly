@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { isValidTimeZone, localToUtcMs, parseLocalDateTime, parseUtcOffset } from "../../src/lib/time.ts";
+import {
+  formatZone,
+  isValidTimeZone,
+  localToUtcMs,
+  parseLocalDateTime,
+  parseTimeZoneInput,
+  parseUtcOffset,
+} from "../../src/lib/time.ts";
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -49,5 +56,31 @@ describe("isValidTimeZone", () => {
     expect(isValidTimeZone("Europe/London")).toBe(true);
     expect(isValidTimeZone("Mars/Olympus")).toBe(false);
     expect(isValidTimeZone("")).toBe(false);
+  });
+});
+
+describe("parseTimeZoneInput", () => {
+  it.each([
+    ["Asia/Manila", "Asia/Manila"],
+    ["asia/manila", "Asia/Manila"],
+    ["PHT", "Asia/Manila"],
+    ["Philippine Standard Time", "Asia/Manila"],
+    ["manila", "Asia/Manila"],
+    ["UTC+8", "+08:00"],
+    ["GMT+08:00", "+08:00"],
+    ["+0530", "+05:30"],
+    ["UTC-5", "-05:00"],
+    ["UTC", "UTC"],
+  ])("normalizes %s → %s", (input, expected) => {
+    expect(parseTimeZoneInput(input)).toBe(expected);
+  });
+
+  it.each(["PST", "cst", "IST", "Mars/Base", "UTC+20", "", null])("rejects ambiguous or unknown %s", (input) => {
+    expect(parseTimeZoneInput(input)).toBeNull();
+  });
+
+  it("formats zones for display", () => {
+    expect(formatZone("+08:00")).toBe("UTC+08:00");
+    expect(formatZone("Asia/Manila")).toBe("Asia/Manila");
   });
 });

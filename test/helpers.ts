@@ -1,6 +1,8 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { vi } from "vitest";
-import type { Interaction } from "../src/discord/types.ts";
+import type { Attachment, Interaction } from "../src/discord/types.ts";
+import type { EventDraft } from "../src/extraction/draft.ts";
+import type { RawEvent } from "../src/extraction/gemini.ts";
 import type { Env } from "../src/env.ts";
 import worker from "../src/index.ts";
 
@@ -115,3 +117,67 @@ export const MANAGE_EVENTS_PERMS = (1n << 33n).toString();
 export function member(id = "111", permissions = MANAGE_EVENTS_PERMS) {
   return { user: { id, username: `user${id}` }, permissions };
 }
+
+/** A complete, valid draft (Asia/Manila, far future) for tests to tweak. */
+export function makeDraft(overrides: Partial<EventDraft> = {}): EventDraft {
+  return {
+    title: "Intro to Rust Workshop",
+    description: "A hands-on beginner workshop.",
+    startDate: "2099-03-05",
+    startTime: "18:00",
+    endDate: null,
+    endTime: "19:30",
+    timeZone: "Asia/Manila",
+    timeZoneText: "PHT",
+    location: "Zoom",
+    isOnline: true,
+    registrationUrl: "https://example.com/register",
+    organizer: "Rust PH",
+    notes: [],
+    ...overrides,
+  };
+}
+
+/** A model-side event with every field present, for building Gemini responses. */
+export function makeRawEvent(overrides: Partial<RawEvent> = {}): RawEvent {
+  return {
+    title: "Intro to Rust Workshop",
+    description: "A hands-on beginner workshop.",
+    start_date: "2099-03-05",
+    start_time: "18:00",
+    end_date: null,
+    end_time: "19:30",
+    utc_offset: null,
+    timezone: "Asia/Manila",
+    timezone_text: "PHT",
+    timezone_ambiguous: false,
+    location: "Zoom",
+    is_online: true,
+    registration_url: "example.com/register",
+    organizer: "Rust PH",
+    ambiguities: [],
+    ...overrides,
+  };
+}
+
+/** Minimal byte payloads with real file signatures. */
+export const IMAGE_BYTES = {
+  png: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3]),
+  jpeg: new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46]),
+  webp: new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x24, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38]),
+  gif: new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0]),
+};
+
+export function makeAttachment(overrides: Partial<Attachment> = {}): Attachment {
+  return {
+    id: "att1",
+    filename: "poster.png",
+    size: IMAGE_BYTES.png.length,
+    url: "https://cdn.discordapp.com/attachments/1/2/poster.png?ex=abc",
+    content_type: "image/png",
+    ...overrides,
+  };
+}
+
+export const image = (bytes: Uint8Array, type = "image/png") =>
+  new Response(bytes, { headers: { "content-type": type } });

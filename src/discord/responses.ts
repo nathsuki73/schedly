@@ -3,6 +3,7 @@ import {
   MessageFlags,
   type InteractionResponse,
   type MessagePayload,
+  type ModalPayload,
 } from "./types.ts";
 
 /** Never let bot output ping @everyone, roles, or users. */
@@ -33,6 +34,14 @@ export function updateMessage(data: MessagePayload): InteractionResponse {
   };
 }
 
-export function deferred(): InteractionResponse {
-  return { type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE };
+/** "Thinking…" placeholder; the real reply is sent later by editing @original. */
+export function deferred({ ephemeral = false } = {}): InteractionResponse {
+  return {
+    type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+    ...(ephemeral ? { data: { flags: MessageFlags.EPHEMERAL } } : {}),
+  };
+}
+
+export function modal(data: ModalPayload): InteractionResponse {
+  return { type: InteractionResponseType.MODAL, data };
 }

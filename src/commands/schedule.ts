@@ -1,19 +1,20 @@
 import { editOriginalResponse, eventLink } from "../discord/api.ts";
 import { deferred, ephemeral } from "../discord/responses.ts";
-import type { Interaction, InteractionResponse } from "../discord/types.ts";
+import type { Attachment, Interaction, InteractionResponse } from "../discord/types.ts";
 import type { Env } from "../env.ts";
-import { hashUrl, normalizeUrl } from "../events/normalize-url.ts";
-import { pendingPreview } from "../events/preview.ts";
+import { eventKey } from "../events/dedupe.ts";
+import { pickerMessage, reviewMessage } from "../events/preview.ts";
 import { EventRepository } from "../events/repository.ts";
-import { extractEvent } from "../extraction/extract.ts";
+import { resolveDraft, type EventDraft } from "../extraction/draft.ts";
+import { extractDrafts } from "../extraction/extract.ts";
+import { downloadImage, sha256Hex, validateAttachment } from "../extraction/image.ts";
 import { UserFacingError, userMessage } from "../lib/errors.ts";
-import { isValidTimeZone } from "../lib/time.ts";
-import { parsePublicUrl } from "../lib/url-safety.ts";
+import { AMBIGUOUS_ZONE_ABBREVIATIONS, parseTimeZoneInput } from "../lib/time.ts";
 
 /**
- * /schedule url:<link> [timezone:<IANA>]
- * Cheap checks run inline so errors are immediate and private; the slow part
- * (fetch + AI) runs after a deferred response, then edits it into a preview.
+ * /schedule image:<attachment> [timezone:<zone>]
+ * Cheap checks run inline so errors are immediate and private. The slow part
+ * (download + AI) runs after a deferred ephemeral response, then edits it into a preview.
  */
 export async function handleSchedule(
   interaction: Interaction,
@@ -24,78 +25,101 @@ export async function handleSchedule(
   const userId = interaction.member?.user.id;
   if (!guildId || !userId) return ephemeral("`/schedule` can only be used inside a server.");
 
-  const rawUrl = stringOption(interaction, "url");
-  const timeZone = stringOption(interaction, "timezone")?.trim();
-
-  let url: URL;
+  const attachmentId = stringOption(interaction, "image");
+  let attachment: Attachment;
   try {
-    url = parsePublicUrl(rawUrl ?? "");
+    attachment = validateAttachment(attachmentId ? interaction.data?.resolved?.attachments?.[attachmentId] : undefined);
   } catch (err) {
     return ephemeral(`❌ ${userMessage(err)}`);
   }
-  if (timeZone && !isValidTimeZone(timeZone)) {
-    return ephemeral(`❌ \`${timeZone.slice(0, 50)}\` isn't a recognized timezone. Use an IANA name like \`Asia/Manila\` or \`America/New_York\`.`);
-  }
 
-  const repo = new EventRepository(env.DB);
-  const urlHash = await hashUrl(normalizeUrl(url));
-
-  const existing = await repo.findEventByHash(guildId, urlHash);
-  if (existing) {
-    return ephemeral(`ℹ️ This event is already scheduled: ${eventLink(guildId, existing.id)}`);
-  }
-  if (await repo.findActivePending(guildId, urlHash)) {
-    return ephemeral("ℹ️ A preview for this link is already waiting for approval in this server.");
+  const timeZoneInput = stringOption(interaction, "timezone")?.trim();
+  const timeZone = timeZoneInput ? parseTimeZoneInput(timeZoneInput) : null;
+  if (timeZoneInput && !timeZone) {
+    const shown = timeZoneInput.slice(0, 50);
+    return ephemeral(
+      AMBIGUOUS_ZONE_ABBREVIATIONS.has(timeZoneInput.toUpperCase())
+        ? `❌ \`${shown}\` is ambiguous. Use a name like \`Asia/Manila\` or an offset like \`UTC+8\`.`
+        : `❌ \`${shown}\` isn't a recognized timezone. Use a name like \`Asia/Manila\` / \`America/New_York\` or an offset like \`UTC+8\`.`,
+    );
   }
 
   ctx.waitUntil(
     buildPreview(env, interaction.token, {
-      url,
-      urlHash,
+      attachment,
       guildId,
       userId,
       channelId: interaction.channel_id ?? null,
       timeZone,
     }),
   );
-  return deferred();
+  return deferred({ ephemeral: true });
 }
 
 interface PreviewRequest {
-  url: URL;
-  urlHash: string;
+  attachment: Attachment;
   guildId: string;
   userId: string;
   channelId: string | null;
-  timeZone: string | undefined;
+  timeZone: string | null;
 }
 
-export async function buildPreview(env: Env, token: string, req: PreviewRequest): Promise<void> {
+export async function buildPreview(env: Env, token: string, req: PreviewRequest, now = Date.now()): Promise<void> {
   const repo = new EventRepository(env.DB);
   try {
-    const event = await extractEvent(env, req.url, { fallbackTimeZone: req.timeZone });
+    const image = await downloadImage(req.attachment);
+    const imageHash = await sha256Hex(image.bytes);
 
-    const similar = await repo.findSimilarEvent(req.guildId, event.title, event.startTime);
-    if (similar) {
-      event.warnings.unshift(`A matching event already exists: ${eventLink(req.guildId, similar.id)}`);
+    if (await repo.findActivePendingByImage(req.guildId, imageHash, now)) {
+      throw new UserFacingError(
+        "This image already has a preview waiting for confirmation. Finish or cancel that one first.",
+      );
     }
 
-    const pending = await repo.createPending({
-      guildId: req.guildId,
-      channelId: req.channelId,
-      requestedBy: req.userId,
-      sourceUrl: req.url.toString(),
-      urlHash: req.urlHash,
-      ...event,
-    });
-    await editOriginalResponse(env, token, pendingPreview(pending));
-    await repo.purgeExpired();
+    const drafts = await extractDrafts(env, image, { fallbackTimeZone: req.timeZone, now });
+    const { fresh, scheduledLinks } = await splitAlreadyScheduled(repo, req.guildId, drafts, now);
+
+    if (fresh.length === 0) {
+      throw new UserFacingError(
+        `${scheduledLinks.length === 1 ? "This event is" : "All events in this image are"} already scheduled:\n${scheduledLinks.join("\n")}`,
+      );
+    }
+    if (scheduledLinks.length && fresh.length === 1) {
+      fresh[0]!.notes.push(`Other events from this image are already scheduled: ${scheduledLinks.join(" ")}`);
+    }
+
+    const pending = await repo.createPending(
+      {
+        guildId: req.guildId,
+        channelId: req.channelId,
+        requestedBy: req.userId,
+        imageHash,
+        draft: fresh.length === 1 ? fresh[0]! : null,
+        candidates: fresh,
+      },
+      now,
+    );
+    await editOriginalResponse(env, token, pending.draft ? reviewMessage(pending, pending.draft, now) : pickerMessage(pending));
+    await repo.purgeExpired(now);
   } catch (err) {
     if (!(err instanceof UserFacingError)) console.error("schedule failed", err);
     await editOriginalResponse(env, token, { content: `❌ ${userMessage(err)}` }).catch((e: unknown) =>
       console.error("failed to report schedule error", e),
     );
   }
+}
+
+/** Separates drafts that already exist as Discord events in this server. */
+async function splitAlreadyScheduled(repo: EventRepository, guildId: string, drafts: EventDraft[], now: number) {
+  const fresh: EventDraft[] = [];
+  const scheduledLinks: string[] = [];
+  for (const draft of drafts) {
+    const { event } = resolveDraft(draft, now);
+    const existing = event ? await repo.findEventByKey(guildId, eventKey(event.title, event.startTime)) : null;
+    if (existing) scheduledLinks.push(eventLink(guildId, existing.id));
+    else fresh.push(draft);
+  }
+  return { fresh, scheduledLinks };
 }
 
 function stringOption(interaction: Interaction, name: string): string | undefined {
