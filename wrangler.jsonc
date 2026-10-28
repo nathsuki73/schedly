@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "schedly",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "schedly",
+      // Replace with the id printed by `npx wrangler d1 create schedly`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "GEMINI_MODEL": "gemini-2.5-flash"
+  }
+  // Secrets (set with `npx wrangler secret put <NAME>`, or `.dev.vars` locally):
+  //   DISCORD_APPLICATION_ID, DISCORD_PUBLIC_KEY, DISCORD_BOT_TOKEN, GEMINI_API_KEY
+}
