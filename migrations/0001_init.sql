@@ -13,7 +13,7 @@ CREATE TABLE pending_events (
   location        TEXT NOT NULL,
   warnings        TEXT NOT NULL DEFAULT '[]',  -- JSON array of strings
   status          TEXT NOT NULL DEFAULT 'pending'
-                  CHECK (status IN ('pending', 'approving', 'approved', 'cancelled', 'failed')),
+                  CHECK (status IN ('pending', 'approving', 'approved', 'cancelled')),
   created_at      INTEGER NOT NULL,            -- Unix ms
   expires_at      INTEGER NOT NULL             -- Unix ms
 );

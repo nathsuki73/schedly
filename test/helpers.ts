@@ -1,4 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import { vi } from "vitest";
 import type { Interaction } from "../src/discord/types.ts";
 import type { Env } from "../src/env.ts";
 import worker from "../src/index.ts";
@@ -60,4 +61,57 @@ export async function sendInteraction(
   const response = await worker.fetch(request, testEnv({ DISCORD_PUBLIC_KEY: signer.publicKeyHex, ...envOverrides }), ctx);
   await waitOnExecutionContext(ctx);
   return response;
+}
+
+export interface RecordedRequest {
+  method: string;
+  url: string;
+  body: unknown;
+  headers: Headers;
+}
+
+type Route = (req: Request) => Response | Promise<Response> | undefined;
+
+/**
+ * Replaces global fetch with a router over `routes` (first match wins) and records every call.
+ * Unmatched requests fail loudly so tests never hit the real network.
+ */
+export function mockFetch(...routes: Route[]): RecordedRequest[] {
+  const calls: RecordedRequest[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const req = new Request(input as RequestInfo, init);
+    const text = req.body ? await req.clone().text() : "";
+    let body: unknown = text;
+    try {
+      body = text ? JSON.parse(text) : undefined;
+    } catch {
+      /* keep raw text */
+    }
+    calls.push({ method: req.method, url: req.url, body, headers: req.headers });
+    for (const route of routes) {
+      const res = await route(req);
+      if (res) return res;
+    }
+    throw new Error(`Unmocked fetch: ${req.method} ${req.url}`);
+  });
+  return calls;
+}
+
+export const html = (body: string, status = 200) =>
+  new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+
+export const jsonResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+/** A Gemini generateContent response wrapping `extraction` as the model's JSON answer. */
+export function geminiResponse(extraction: Record<string, unknown>): Response {
+  return jsonResponse({
+    candidates: [{ content: { parts: [{ text: JSON.stringify(extraction) }] }, finishReason: "STOP" }],
+  });
+}
+
+export const MANAGE_EVENTS_PERMS = (1n << 33n).toString();
+
+export function member(id = "111", permissions = MANAGE_EVENTS_PERMS) {
+  return { user: { id, username: `user${id}` }, permissions };
 }

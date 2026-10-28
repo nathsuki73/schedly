@@ -13,7 +13,6 @@
     "db:migrate:local": "wrangler d1 migrations apply schedly --local",
     "db:migrate:remote": "wrangler d1 migrations apply schedly --remote"
   },
-  "license": "MIT",
   "type": "module",
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.9",
